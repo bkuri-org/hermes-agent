@@ -1,0 +1,10 @@
+name: approval-text-intercept
+description: >
+  Resolve pending command approvals via plain-text responses (yes, no,
+  session, always, deny, etc.) instead of requiring /approve or /deny
+  slash commands.  Critical for Matrix clients like weechat-matrix where
+  slash commands are intercepted by the client and reactions are unsupported.
+
+  Keywords are configurable via gateway.approval_keywords in config.yaml.
+events:
+  - message:receive

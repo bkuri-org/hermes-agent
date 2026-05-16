@@ -1,0 +1,7 @@
+name: message-receive-logger
+description: >
+  Proof-of-concept builtin hook that logs every message:receive event.
+  Demonstrates the message:receive hook mechanism. Disabled by default —
+  enable via config.yaml ``gateway.hooks.message_receive_logger.enabled: true``.
+events:
+  - message:receive

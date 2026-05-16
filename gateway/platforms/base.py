@@ -1277,6 +1277,7 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._hooks: Any = None  # HookRegistry, wired by runner
         self._running = False
         self._fatal_error_code: Optional[str] = None
         self._fatal_error_message: Optional[str] = None
@@ -1524,6 +1525,15 @@ class BasePlatformAdapter(ABC):
     def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
         """Set an optional handler for messages arriving during active sessions."""
         self._busy_session_handler = handler
+    
+    def set_hooks(self, hooks: Any) -> None:
+        """Set the hook registry for firing message:receive events.
+        
+        The runner wires this up during adapter registration so that
+        ``handle_message`` can fire ``message:receive`` hooks before
+        dispatch.  The hooks object must support ``emit_collect()``.
+        """
+        self._hooks = hooks
     
     def set_session_store(self, session_store: Any) -> None:
         """
@@ -2827,6 +2837,57 @@ class BasePlatformAdapter(ABC):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
+
+        # ── message:receive hook ──────────────────────────────────────
+        # Fires before any dispatch logic (active-session checks,
+        # command routing, agent interrupts).  Hooks can return:
+        #   {"decision": "allow"}  — continue normal dispatch (default)
+        #   {"decision": "handled", "message": "..."}  — skip dispatch,
+        #                                             send message back
+        #   {"decision": "reject", "reason": "..."}  — reject with reason
+        if self._hooks is not None:
+            try:
+                hook_results = await self._hooks.emit_collect(
+                    "message:receive",
+                    {
+                        "text": event.text,
+                        "source": {
+                            "chat_id": event.source.chat_id,
+                            "user_id": event.source.user_id,
+                            "platform": self.platform.value,
+                        },
+                        "session_key": session_key,
+                        "is_command": event.msg_type == MessageType.COMMAND,
+                    },
+                )
+                for hook_result in hook_results:
+                    if not isinstance(hook_result, dict):
+                        continue
+                    decision = str(hook_result.get("decision", "")).strip().lower()
+                    if not decision or decision == "allow":
+                        continue
+                    if decision == "reject":
+                        reason = hook_result.get("reason") or hook_result.get("message") or "Message rejected by hook."
+                        await self._send_with_retry(
+                            chat_id=event.source.chat_id,
+                            content=f"⚠️ {reason}",
+                            reply_to=_reply_anchor_for_event(event),
+                        )
+                        return
+                    if decision == "handled":
+                        msg = hook_result.get("message")
+                        if isinstance(msg, str) and msg:
+                            await self._send_with_retry(
+                                chat_id=event.source.chat_id,
+                                content=msg,
+                                reply_to=_reply_anchor_for_event(event),
+                            )
+                        return
+            except Exception as e:
+                logger.warning(
+                    "[%s] message:receive hook error (non-fatal): %s",
+                    self.name, e, exc_info=True,
+                )
 
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or
