@@ -3576,6 +3576,7 @@ class GatewayRunner:
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+            adapter.set_hooks(self.hooks)
             
             # Try to connect
             logger.info("Connecting to %s...", platform.value)
@@ -4873,6 +4874,7 @@ class GatewayRunner:
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+                    adapter.set_hooks(self.hooks)
 
                     success = await self._connect_adapter_with_timeout(adapter, platform)
                     if success:

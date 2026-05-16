@@ -6,7 +6,10 @@ Hooks are discovered from ~/.hermes/hooks/ directories, each containing:
   - HOOK.yaml  (metadata: name, description, events list)
   - handler.py (Python handler with async def handle(event_type, context))
 
+Built-in hooks live in gateway/builtin_hooks/ and are registered automatically.
+
 Events:
+  - message:receive    -- Incoming message, before any dispatch (hookable)
   - gateway:startup     -- Gateway process starts
   - session:start       -- New session created (first message of a new session)
   - session:end         -- Session ends (user ran /new or /reset)
@@ -15,6 +18,13 @@ Events:
   - agent:step          -- Each turn in the tool-calling loop
   - agent:end           -- Agent finishes processing
   - command:*           -- Any slash command executed (wildcard match)
+
+message:receive hook protocol:
+  Hooks receive context with: text, source, session_key, is_command.
+  Return values control dispatch:
+    None / {"decision": "allow"}    -- continue normal dispatch
+    {"decision": "reject", ...}     -- reject with reason, sent to user
+    {"decision": "handled", ...}    -- hook handled it, skip dispatch
 
 Errors in hooks are caught and logged but never block the main pipeline.
 """
@@ -55,11 +65,66 @@ class HookRegistry:
     def _register_builtin_hooks(self) -> None:
         """Register built-in hooks that are always active.
 
-        Currently empty — no shipped built-in hooks. Kept as the extension
-        point for future always-on gateway hooks so they drop in without
-        re-plumbing discover_and_load().
+        Built-in hooks live in ``gateway/builtin_hooks/`` and follow the
+        same HOOK.yaml + handler.py convention as user hooks.  They are
+        registered unconditionally (no ``enabled`` check — each hook's
+        handler can opt to no-op if it wants its own toggle).
         """
-        return
+        import os
+        builtin_dir = os.path.join(os.path.dirname(__file__), "builtin_hooks")
+        if not os.path.isdir(builtin_dir):
+            return
+
+        for entry in sorted(os.listdir(builtin_dir)):
+            hook_dir = os.path.join(builtin_dir, entry)
+            if not os.path.isdir(hook_dir):
+                continue
+
+            manifest_path = os.path.join(hook_dir, "HOOK.yaml")
+            handler_path = os.path.join(hook_dir, "handler.py")
+            if not os.path.exists(manifest_path) or not os.path.exists(handler_path):
+                continue
+
+            try:
+                manifest = yaml.safe_load(open(manifest_path, encoding="utf-8"))
+                if not manifest or not isinstance(manifest, dict):
+                    continue
+                hook_name = manifest.get("name", entry)
+                events = manifest.get("events", [])
+                if not events:
+                    continue
+
+                import importlib.util
+                module_name = f"hermes_builtin_hook_{hook_name}"
+                spec = importlib.util.spec_from_file_location(module_name, handler_path)
+                if spec is None or spec.loader is None:
+                    continue
+
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    sys.modules.pop(module_name, None)
+                    raise
+
+                handle_fn = getattr(module, "handle", None)
+                if handle_fn is None:
+                    continue
+
+                for event in events:
+                    self._handlers.setdefault(event, []).append(handle_fn)
+
+                self._loaded_hooks.append({
+                    "name": hook_name,
+                    "description": manifest.get("description", ""),
+                    "events": events,
+                    "path": hook_dir,
+                    "builtin": True,
+                })
+
+            except Exception as e:
+                print(f"[hooks] Error loading builtin hook {entry}: {e}", flush=True)
 
     def discover_and_load(self) -> None:
         """
