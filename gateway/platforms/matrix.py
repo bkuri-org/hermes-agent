@@ -1207,11 +1207,11 @@ class MatrixAdapter(BasePlatformAdapter):
             "⚠️ **Dangerous command requires approval**\n"
             f"```\n{cmd_preview}\n```\n"
             f"Reason: {description}\n\n"
-            "Reply `/approve` to execute, `/approve session` to approve this pattern for the session, "
-            "`/approve always` to approve permanently, or `/deny` to cancel.\n\n"
-            "You can also click the reaction to approve:\n"
-            "✅ = /approve\n"
-            "❎ = /deny"
+            "Reply **yes** to execute, **session** to approve this pattern for the session, "
+            "**always** to approve permanently, or **no** to cancel.\n\n"
+            "You can also react to this message:\n"
+            "✅ = approve\n"
+            "❎ = deny"
         )
 
         result = await self.send(chat_id, text, metadata=metadata)
