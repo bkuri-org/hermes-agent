@@ -6248,17 +6248,8 @@ class GatewayRunner:
                     from tools.approval import has_blocking_approval as _has_approval_txt
                     if _has_approval_txt(_quick_key):
                         _raw_lower = (event.text or "").strip().lower()
-                        _APPROVAL_TEXT_MAP = {
-                            "yes": "once", "y": "once", "ok": "once",
-                            "approve": "once", "once": "once",
-                            "run": "once", "go": "once", "go ahead": "once",
-                            "do it": "once", "execute": "once", "confirm": "once",
-                            "session": "session", "always": "always",
-                            "permanently": "always",
-                            "no": "deny", "n": "deny", "deny": "deny",
-                            "cancel": "deny", "nevermind": "deny", "reject": "deny",
-                        }
-                        _text_choice = _APPROVAL_TEXT_MAP.get(_raw_lower)
+                        _approval_kw = self.config.approval_keywords if self.config else {}
+                        _text_choice = _approval_kw.get(_raw_lower)
                         if _text_choice is not None:
                             logger.info(
                                 "Plain-text approval '%s' → choice=%s for session %s",

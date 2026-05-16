@@ -2917,12 +2917,8 @@ class BasePlatformAdapter(ABC):
 
                 if _has_pending_approval:
                     _raw_lower = (event.text or "").strip().lower()
-                    _approval_keywords = {
-                        "yes", "y", "ok", "approve", "approve once", "once",
-                        "run", "go", "go ahead", "do it", "execute", "confirm",
-                        "session", "always", "permanently",
-                        "no", "n", "deny", "cancel", "nevermind", "reject",
-                    }
+                    from gateway.config import DEFAULT_APPROVAL_KEYWORDS
+                    _approval_keywords = set(DEFAULT_APPROVAL_KEYWORDS.keys())
                     if _raw_lower in _approval_keywords:
                         logger.debug(
                             "[%s] Routing message to approval text-intercept for %s",

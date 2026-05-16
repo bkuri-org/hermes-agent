@@ -19,6 +19,43 @@ from enum import Enum
 from hermes_cli.config import get_hermes_home
 from utils import is_truthy_value
 
+# ── Approval text-intercept defaults ──────────────────────────────────
+# Maps plain-text user responses → approval choices.
+# Users can override or extend via config.yaml ``gateway.approval_keywords``.
+# The merge strategy is: user keys override defaults, unmatched defaults
+# are preserved.  To remove a default, map it to ``null`` (or omit and
+# provide a full replacement).
+DEFAULT_APPROVAL_KEYWORDS: Dict[str, str] = {
+    # Approval (→ once)
+    "yes": "once", "y": "once", "ok": "once",
+    "approve": "once", "once": "once",
+    "run": "once", "go": "once", "go ahead": "once",
+    "do it": "once", "execute": "once", "confirm": "once",
+    # Session / always
+    "session": "session", "always": "always", "permanently": "always",
+    # Denial
+    "no": "deny", "n": "deny", "deny": "deny",
+    "cancel": "deny", "nevermind": "deny", "reject": "deny",
+}
+
+
+def _merge_approval_keywords(user_keywords: Dict[str, Any]) -> Dict[str, str]:
+    """Merge user-provided approval keywords with defaults.
+
+    User keys override defaults.  Setting a key to ``null`` or ``~`` removes it.
+    If the user provides *any* keywords, all defaults are kept unless explicitly
+    overridden — this lets users add aliases without repeating the full set.
+    """
+    merged = dict(DEFAULT_APPROVAL_KEYWORDS)
+    if isinstance(user_keywords, dict):
+        for key, value in user_keywords.items():
+            key_lower = str(key).strip().lower()
+            if value is None or str(value).strip().lower() in ("null", "~", ""):
+                merged.pop(key_lower, None)
+            else:
+                merged[key_lower] = str(value).strip().lower()
+    return merged
+
 logger = logging.getLogger(__name__)
 
 
@@ -486,6 +523,11 @@ class GatewayConfig:
     # fresh session exactly as if the reset policy had fired.  0 = disabled.
     session_store_max_age_days: int = 90
 
+    # Approval text-intercept keywords: maps plain-text responses to
+    # approval choices.  Users can override or extend this via
+    # config.yaml ``gateway.approval_keywords``.
+    approval_keywords: Dict[str, str] = field(default_factory=dict)
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
         connected = []
@@ -632,6 +674,13 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        # Approval keywords: merge user overrides with defaults
+        user_approval_kw = data.get("approval_keywords")
+        if isinstance(user_approval_kw, dict) and user_approval_kw:
+            approval_keywords = _merge_approval_keywords(user_approval_kw)
+        else:
+            approval_keywords = dict(DEFAULT_APPROVAL_KEYWORDS)
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -647,6 +696,7 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
+            approval_keywords=approval_keywords,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -753,6 +803,15 @@ def load_gateway_config() -> GatewayConfig:
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
                 )
+
+            # Approval keywords: can be specified at top level or under
+            # the ``gateway:`` namespace.  ``gateway.approval_keywords``
+            # is the documented config.yaml key.
+            ak = yaml_cfg.get("approval_keywords")
+            if ak is None:
+                ak = yaml_cfg.get("gateway", {}).get("approval_keywords")
+            if ak is not None:
+                gw_data["approval_keywords"] = ak
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.
