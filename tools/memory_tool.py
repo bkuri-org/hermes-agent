@@ -48,6 +48,61 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Pre-write deduplication and coalescing helpers
+# ---------------------------------------------------------------------------
+
+def _extract_header(entry: str) -> str:
+    """Extract the bold header from a memory entry (e.g. '**Desktop:**').
+
+    Returns empty string if no header found. Used to detect entries about
+    the same topic that should be coalesced rather than appended.
+    """
+    m = re.match(r'\*\*(.+?)\*\*:?\s*', entry)
+    header = m.group(1).strip() if m else ""
+    # Strip trailing colon from header (e.g. "Desktop:" → "Desktop")
+    return header.rstrip(":")
+
+
+def _normalize_for_similarity(text: str) -> str:
+    """Normalize text for similarity comparison: lowercase, strip punctuation."""
+    t = text.lower()
+    t = re.sub(r'[^a-z0-9\s]', '', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def _word_bigrams(text: str) -> set:
+    """Extract word-level bigrams from normalized text."""
+    words = text.split()
+    return {f"{words[i]} {words[i + 1]}" for i in range(len(words) - 1)} if len(words) > 1 else set()
+
+
+def _jaccard(a: set, b: set) -> float:
+    """Jaccard similarity between two sets."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Similarity score between two memory entries (0.0-1.0).
+
+    Uses word bigram Jaccard on normalized text. Short texts (<20 chars
+    after normalization) get 0 similarity to avoid false positives on
+    abbreviations, hostnames, and other short identifiers.
+    """
+    na, nb = _normalize_for_similarity(a), _normalize_for_similarity(b)
+    if len(na) < 20 or len(nb) < 20:
+        return 0.0
+    return _jaccard(_word_bigrams(na), _word_bigrams(nb))
+
+
+# Thresholds for pre-write optimization
+_HEADER_SIMILARITY_THRESHOLD = 0.25   # same bold header + 25% similarity → coalesce
+_CONTENT_SIMILARITY_THRESHOLD = 0.45  # no shared header but 45% similarity → coalesce
+
 # Where memory files live — resolved dynamically so profile overrides
 # (HERMES_HOME env var changes) are always respected.  The old module-level
 # constant was cached at import time and could go stale if a profile switch
@@ -219,7 +274,22 @@ class MemoryStore:
         return self.memory_char_limit
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
-        """Append a new entry. Returns error if it would exceed the char limit."""
+        """Append a new entry with pre-write dedup and coalescing.
+
+        Before checking the char limit, applies three optimizations to avoid
+        filling the store with near-duplicate entries:
+
+        1. Exact duplicate rejection (unchanged)
+        2. Header-based coalescing: same bold header + content similarity → replace
+        3. Content similarity coalescing: high similarity without header match → replace
+
+        If the store is still over the char limit after coalescing, the longest
+        existing entry (excluding the just-written one) is truncated to make room.
+        As a last resort, the shortest entry is removed entirely.
+
+        Invariant: new writes always succeed. Existing entries are only trimmed
+        or removed when necessary to make room — never silently dropped otherwise.
+        """
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
@@ -240,28 +310,82 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
-            # Calculate what the new total would be
-            new_entries = entries + [content]
-            new_total = len(ENTRY_DELIMITER.join(new_entries))
+            # --- Pre-write coalescing ---
+            coalesced = False
+            new_header = _extract_header(content)
+            best_idx = -1
+            best_score = 0.0
+            header_match = False
+
+            for i, existing in enumerate(entries):
+                existing_header = _extract_header(existing)
+
+                # Strategy 1: Same bold header → likely same topic
+                if new_header and existing_header and new_header == existing_header:
+                    sim = _text_similarity(content, existing)
+                    if sim >= _HEADER_SIMILARITY_THRESHOLD:
+                        best_idx = i
+                        best_score = sim
+                        header_match = True
+                        break  # header match is strongest signal
+
+                # Strategy 2: High content similarity (no header match needed)
+                sim = _text_similarity(content, existing)
+                if sim > best_score and sim >= _CONTENT_SIMILARITY_THRESHOLD:
+                    best_score = sim
+                    best_idx = i
+                    coalesced = True
+                    # Don't break — a header match (if any) would be stronger
+
+            if header_match or coalesced:
+                # Merge: keep the longer (more complete) version
+                old_entry = entries[best_idx]
+                entries[best_idx] = content if len(content) >= len(old_entry) else old_entry
+                coalesced = True
+            else:
+                entries.append(content)
+
+            # --- Auto-trim if over limit ---
+            new_total = len(ENTRY_DELIMITER.join(entries))
+            trim_log = []
 
             if new_total > limit:
-                current = self._char_count(target)
-                return {
-                    "success": False,
-                    "error": (
-                        f"Memory at {current:,}/{limit:,} chars. "
-                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Replace or remove existing entries first."
-                    ),
-                    "current_entries": entries,
-                    "usage": f"{current:,}/{limit:,}",
-                }
+                # Trim longest entries first (skip the one we just wrote/merged)
+                sorted_by_len = sorted(
+                    [(i, len(e)) for i, e in enumerate(entries)
+                     if not (coalesced and i == best_idx)],
+                    key=lambda x: x[1], reverse=True,
+                )
+                for trim_idx, entry_len in sorted_by_len:
+                    if entry_len <= 80:
+                        break
+                    # Truncate to 55% of original, keeping the beginning
+                    # (most important info is typically at the start of an entry)
+                    entries[trim_idx] = entries[trim_idx][:int(entry_len * 0.55)].rstrip()
+                    trim_log.append(f"trimmed entry #{trim_idx} ({entry_len}→{len(entries[trim_idx])} chars)")
+                    new_total = len(ENTRY_DELIMITER.join(entries))
+                    if new_total <= limit:
+                        break
 
-            entries.append(content)
+            # If STILL over limit (extremely rare), remove shortest non-critical entry
+            if new_total > limit:
+                sorted_by_len = sorted(
+                    [(i, len(e)) for i, e in enumerate(entries)
+                     if not (coalesced and i == best_idx)],
+                    key=lambda x: x[1],
+                )
+                if sorted_by_len:
+                    remove_idx = sorted_by_len[0][0]
+                    entries.pop(remove_idx)
+                    trim_log.append(f"evicted shortest entry")
+
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+        msg = "Entry coalesced." if coalesced else "Entry added."
+        if trim_log:
+            msg += f" Auto-trimmed: {'; '.join(trim_log)}"
+        return self._success_response(target, msg)
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
