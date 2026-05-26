@@ -6237,6 +6237,32 @@ class GatewayRunner:
                     return await self._handle_approve_command(event)
                 return await self._handle_deny_command(event)
 
+            # Plain-text approval intercept: when the agent is blocked on an
+            # exec-approval gate and the user sends a plain-text response
+            # (not a slash command), resolve it directly.  This is essential
+            # for Matrix clients like weechat-matrix that cannot send slash
+            # commands or reactions.  The base adapter's approval text-intercept
+            # routes matching messages here via _message_handler.
+            if not _evt_cmd:
+                try:
+                    from tools.approval import has_blocking_approval as _has_approval_txt
+                    if _has_approval_txt(_quick_key):
+                        _raw_lower = (event.text or "").strip().lower()
+                        _approval_kw = self.config.approval_keywords if self.config else {}
+                        _text_choice = _approval_kw.get(_raw_lower)
+                        if _text_choice is not None:
+                            logger.info(
+                                "Plain-text approval '%s' → choice=%s for session %s",
+                                _raw_lower, _text_choice, _quick_key,
+                            )
+                            if _text_choice == "deny":
+                                return await self._handle_deny_command(event)
+                            # Synthesize approve args from the text choice
+                            event._text = f"/approve {_text_choice}"
+                            return await self._handle_approve_command(event)
+                except Exception:
+                    pass
+
             # /agents (/tasks alias) should be query-only and never interrupt.
             if _cmd_def_inner and _cmd_def_inner.name == "agents":
                 return await self._handle_agents_command(event)

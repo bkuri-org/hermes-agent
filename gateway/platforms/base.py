@@ -2894,6 +2894,62 @@ class BasePlatformAdapter(ABC):
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
                 return
 
+            # Approval text-intercept: if the agent is blocked on an
+            # exec-approval gate awaiting a yes/no/approve/deny response,
+            # the next non-command message in this session MUST reach the
+            # runner so the approval-intercept can resolve it and unblock
+            # the agent.
+            #
+            # This is critical for Matrix (and similar platforms) where
+            # clients like weechat-matrix cannot reliably send slash
+            # commands or reactions. Plain-text responses ("yes", "no",
+            # "approve", "deny") need to reach the runner's existing
+            # text-matching approval resolver.
+            # Same pattern as the clarify bypass below — both cases are
+            # "agent thread blocked on Event.wait, message must reach the
+            # resolver before being treated as a new turn."
+            if not cmd:
+                try:
+                    from tools.approval import has_blocking_approval as _has_approval
+                    _has_pending_approval = _has_approval(session_key)
+                except Exception:
+                    _has_pending_approval = False
+
+                if _has_pending_approval:
+                    _raw_lower = (event.text or "").strip().lower()
+                    from gateway.config import DEFAULT_APPROVAL_KEYWORDS
+                    _approval_keywords = set(DEFAULT_APPROVAL_KEYWORDS.keys())
+                    if _raw_lower in _approval_keywords:
+                        logger.debug(
+                            "[%s] Routing message to approval text-intercept for %s",
+                            self.name, session_key,
+                        )
+                        try:
+                            _thread_meta = _thread_metadata_for_source(
+                                event.source, _reply_anchor_for_event(event)
+                            )
+                            response = await self._message_handler(event)
+                            _text, _eph_ttl = self._unwrap_ephemeral(response)
+                            if _text:
+                                _r = await self._send_with_retry(
+                                    chat_id=event.source.chat_id,
+                                    content=_text,
+                                    reply_to=_reply_anchor_for_event(event),
+                                    metadata=_thread_meta,
+                                )
+                                if _eph_ttl > 0 and _r.success and _r.message_id:
+                                    self._schedule_ephemeral_delete(
+                                        chat_id=event.source.chat_id,
+                                        message_id=_r.message_id,
+                                        ttl_seconds=_eph_ttl,
+                                    )
+                        except Exception as e:
+                            logger.error(
+                                "[%s] Approval text-intercept dispatch failed: %s",
+                                self.name, e, exc_info=True,
+                            )
+                        return
+
             # Clarify text-capture bypass: if the agent is blocked on a
             # clarify_tool call awaiting a free-form text response (open-
             # ended clarify, or user picked "Other"), the next non-command
