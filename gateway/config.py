@@ -998,8 +998,8 @@ def load_gateway_config() -> GatewayConfig:
                 ]
 
             # Approval text-intercept keywords
-            if isinstance(gateway_cfg, dict) and "approval_keywords" in gateway_cfg:
-                ak = gateway_cfg["approval_keywords"]
+            if isinstance(gateway_section, dict) and "approval_keywords" in gateway_section:
+                ak = gateway_section["approval_keywords"]
                 if isinstance(ak, dict):
                     gw_data["approval_keywords"] = ak
 
