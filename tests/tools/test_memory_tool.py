@@ -291,16 +291,35 @@ class TestMemoryStoreAdd:
         assert result["success"] is True  # No error, just a note
         assert len(store.memory_entries) == 1  # Not duplicated
 
-    def test_add_exceeding_limit_rejected(self, store):
-        # Fill up to near limit
-        store.add("memory", "x" * 490)
+    def test_add_exceeding_limit_auto_trims(self, store):
+        # Fill up to near limit, then add something that overflows.
+        store.add("memory", "entry-one")
+        store.add("memory", "x" * 480)
         result = store.add("memory", "this will exceed the limit")
-        assert result["success"] is False
-        assert "exceed" in result["error"].lower()
-        # Overflow response gives the model what it needs to consolidate in-turn
-        assert "current_entries" in result
-        assert "usage" in result
-        assert "retry" in result["error"].lower()
+        assert result["success"] is True
+        # Auto-trim should have removed oldest entries to make room
+        assert store._char_count("memory") <= store.memory_char_limit
+
+    def test_add_coalesces_on_header_match(self, store):
+        store.add("memory", "User prefers dark mode")
+        result = store.add("memory", "User prefers dark theme")
+        assert result["success"] is True
+        assert "coalesce" in result["message"].lower()
+        assert len(store.memory_entries) == 1
+        assert "dark theme" in store.memory_entries[0]
+
+    def test_add_coalesces_on_content_similarity(self, store):
+        store.add("memory", "Server runs Arch Linux with ZFS")
+        result = store.add("memory", "The server runs Arch Linux with ZFS filesystem")
+        assert result["success"] is True
+        assert "coalesce" in result["message"].lower()
+        assert len(store.memory_entries) == 1
+
+    def test_add_does_not_coalesce_unrelated(self, store):
+        store.add("memory", "User likes pizza")
+        result = store.add("memory", "Server runs Arch Linux")
+        assert result["success"] is True
+        assert len(store.memory_entries) == 2
 
     def test_replace_exceeding_limit_returns_consolidation_context(self, store):
         # A replace that blows the budget should mirror the add-overflow shape:
