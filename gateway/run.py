@@ -9792,8 +9792,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 f"Enable it with: `hermes skills config`"
                             )
                     user_instruction = event.get_command_args().strip()
+                    _room_note = (
+                        source.chat_name or ""
+                        if source and source.chat_name and source.chat_name != "brainstorm"
+                        else ""
+                    )
                     msg = build_skill_invocation_message(
-                        cmd_key, user_instruction, task_id=_quick_key
+                        cmd_key, user_instruction, task_id=_quick_key,
+                        runtime_note=_room_note,
                     )
                     if msg:
                         event.text = msg
