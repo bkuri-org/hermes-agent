@@ -26,6 +26,7 @@ Design:
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from contextlib import contextmanager
@@ -108,6 +109,40 @@ def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
             "then remove or rewrite the original file to a clean state."
         ),
     }
+
+
+# ── Memory dedup helpers ──────────────────────────────────────────
+
+_HEADER_SIMILARITY_THRESHOLD = 0.25
+_CONTENT_SIMILARITY_THRESHOLD = 0.45
+_MAX_BIGRAMS_FOR_SIMILARITY = 4000
+
+
+def _word_bigrams(text: str, limit: int = _MAX_BIGRAMS_FOR_SIMILARITY) -> set:
+    words = text.lower().split()
+    if len(words) < 2:
+        return set()
+    if len(words) > limit:
+        words = words[:limit]
+    return {words[i] + " " + words[i + 1] for i in range(len(words) - 1)}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _text_similarity(a: str, b: str) -> float:
+    return _jaccard(_word_bigrams(a), _word_bigrams(b))
+
+
+def _extract_header(line: str) -> str:
+    line = line.strip()
+    for prefix in ("user:", "memory:", "user:", "memory:"):
+        if line.lower().startswith(prefix):
+            return line[len(prefix):].strip()
+    return line
 
 
 class MemoryStore:
@@ -334,7 +369,7 @@ class MemoryStore:
         return self.memory_char_limit
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
-        """Append a new entry. Returns error if it would exceed the char limit."""
+        """Add a new entry with dedup and auto-trim. Writes always succeed."""
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
@@ -360,25 +395,32 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
-            # Calculate what the new total would be
-            new_entries = entries + [content]
-            new_total = len(ENTRY_DELIMITER.join(new_entries))
+            # ── Semantic dedup: coalesce similar entries ────────────
+            new_header = _extract_header(content.split("\n")[0])
+            best_idx = None
+            best_score = 0.0
+            for i, existing in enumerate(entries):
+                ex_header = _extract_header(existing.split("\n")[0])
+                h_sim = _text_similarity(new_header, ex_header)
+                c_sim = _text_similarity(content, existing)
+                score = max(h_sim, c_sim)
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+            if best_idx is not None and best_score >= max(_HEADER_SIMILARITY_THRESHOLD, _CONTENT_SIMILARITY_THRESHOLD):
+                entries[int(best_idx)] = content
+                self._set_entries(target, entries)
+                self.save_to_disk(target)
+                return self._success_response(
+                    target,
+                    f"Coalesced with similar entry (score={best_score:.2f}).",
+                )
 
-            if new_total > limit:
-                current = self._char_count(target)
-                return self._consolidation_failure({
-                    "success": False,
-                    "error": (
-                        f"Memory at {current:,}/{limit:,} chars. "
-                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Consolidate now: use 'replace' to merge overlapping entries into "
-                        f"shorter ones or 'remove' stale or less important entries (see "
-                        f"current_entries below), then retry this add — all in this turn."
-                    ),
-                    "current_entries": entries,
-                    "usage": f"{current:,}/{limit:,}",
-                })
-
+            # ── Auto-trim if over limit ─────────────────────────────
+            new_total = len(ENTRY_DELIMITER.join(entries + [content]))
+            while new_total > limit and entries:
+                removed = entries.pop(0)
+                new_total = len(ENTRY_DELIMITER.join(entries + [content]))
             entries.append(content)
             self._set_entries(target, entries)
             self.save_to_disk(target)
