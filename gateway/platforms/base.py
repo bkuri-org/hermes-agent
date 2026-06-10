@@ -2380,6 +2380,7 @@ class BasePlatformAdapter(ABC):
         # mitigating indirect prompt injection from third parties in a shared
         # thread/channel.
         self._authorization_check: Optional[Callable[[str, Optional[str], Optional[str]], bool]] = None
+        self._hooks: Any = None
         # Auto-TTS on voice input: ``_auto_tts_default`` is the global default
         # (``voice.auto_tts`` in config.yaml, pushed by GatewayRunner on connect).
         # Per-chat overrides live in two sets populated from ``_voice_mode``:
@@ -2849,6 +2850,9 @@ class BasePlatformAdapter(ABC):
                 self.name, user_id, exc_info=True,
             )
             return None
+    def set_hooks(self, hooks: Any) -> None:
+        """Set the HookRegistry instance for message:receive event emission."""
+        self._hooks = hooks
     
     def set_session_store(self, session_store: Any) -> None:
         """
@@ -4606,6 +4610,47 @@ class BasePlatformAdapter(ABC):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
+
+        # Emit message:receive hook — allows builtin/user hooks to inspect,
+        # reject, or short-circuit incoming messages before dispatch.
+        if self._hooks is not None:
+            try:
+                hook_ctx = {
+                    "text": getattr(event, "text", ""),
+                    "source": {
+                        "platform": getattr(event.source, "platform", None),
+                        "user_id": getattr(event.source, "user_id", None),
+                        "chat_id": getattr(event.source, "chat_id", None),
+                        "chat_name": getattr(event.source, "chat_name", None),
+                        "thread_id": getattr(event.source, "thread_id", None),
+                        "chat_type": getattr(event.source, "chat_type", None),
+                    },
+                    "session_key": session_key,
+                    "is_command": bool(event.get_command()),
+                }
+                results = await self._hooks.emit_collect("message:receive", hook_ctx)
+                for result in results:
+                    if not isinstance(result, dict):
+                        continue
+                    decision = result.get("decision", "allow")
+                    if decision == "reject":
+                        reply_msg = result.get("message")
+                        if reply_msg:
+                            await self.send(
+                                getattr(event.source, "chat_id", ""),
+                                reply_msg,
+                            )
+                        return
+                    if decision == "handled":
+                        reply_msg = result.get("message")
+                        if reply_msg:
+                            await self.send(
+                                getattr(event.source, "chat_id", ""),
+                                reply_msg,
+                            )
+                        return
+            except Exception as e:
+                logger.warning("[%s] message:receive hook error: %s", self.name, e, exc_info=True)
 
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or

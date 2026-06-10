@@ -1,0 +1,7 @@
+name: message-receive-logger
+description: >
+  Proof-of-concept builtin hook that logs every incoming message at
+  DEBUG level via the message:receive event. Demonstrates the
+  message:receive hook protocol.
+events:
+  - message:receive

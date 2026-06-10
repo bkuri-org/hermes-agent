@@ -11,6 +11,12 @@ Events:
   - session:start       -- New session created (first message of a new session)
   - session:end         -- Session ends (user ran /new or /reset)
   - session:reset       -- Session reset completed (new session entry created)
+  - message:receive     -- Incoming message received (before dispatch).  Decision-style
+                          hook via emit_collect: handlers may return
+                          {"decision": "allow"} (default, including None),
+                          {"decision": "reject", "message": ...} to drop the
+                          message, or {"decision": "handled", "message": ...} to
+                          short-circuit dispatch and reply immediately.
   - agent:start         -- Agent begins processing a message
   - agent:step          -- Each turn in the tool-calling loop
   - agent:end           -- Agent finishes processing
@@ -39,6 +45,7 @@ and ``thread_id`` is non-empty.
 import asyncio
 import importlib.util
 import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import yaml
@@ -72,11 +79,73 @@ class HookRegistry:
     def _register_builtin_hooks(self) -> None:
         """Register built-in hooks that are always active.
 
-        Currently empty — no shipped built-in hooks. Kept as the extension
-        point for future always-on gateway hooks so they drop in without
-        re-plumbing discover_and_load().
+        Scans ``gateway/builtin_hooks/`` (shipped with the repo) for hook
+        directories following the same protocol as user hooks:
+          - HOOK.yaml  (metadata: name, description, events list)
+          - handler.py (Python handler with ``handle(event_type, context)``)
         """
-        return
+        builtin_dir = Path(__file__).resolve().parent / "builtin_hooks"
+        if not builtin_dir.is_dir():
+            return
+
+        for hook_dir in sorted(builtin_dir.iterdir()):
+            if not hook_dir.is_dir():
+                continue
+
+            manifest_path = hook_dir / "HOOK.yaml"
+            handler_path = hook_dir / "handler.py"
+
+            if not manifest_path.exists() or not handler_path.exists():
+                continue
+
+            try:
+                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+                if not manifest or not isinstance(manifest, dict):
+                    print(f"[hooks] Skipping builtin {hook_dir.name}: invalid HOOK.yaml", flush=True)
+                    continue
+
+                hook_name = manifest.get("name", hook_dir.name)
+                events = manifest.get("events", [])
+                if not events:
+                    print(f"[hooks] Skipping builtin {hook_name}: no events declared", flush=True)
+                    continue
+
+                module_name = f"hermes_builtin_hook_{hook_name}"
+                spec = importlib.util.spec_from_file_location(
+                    module_name, handler_path
+                )
+                if spec is None or spec.loader is None:
+                    print(f"[hooks] Skipping builtin {hook_name}: could not load handler.py", flush=True)
+                    continue
+
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    sys.modules.pop(module_name, None)
+                    raise
+
+                handle_fn = getattr(module, "handle", None)
+                if handle_fn is None:
+                    print(f"[hooks] Skipping builtin {hook_name}: no 'handle' function found", flush=True)
+                    continue
+
+                for event in events:
+                    self._handlers.setdefault(event, []).append(handle_fn)
+
+                self._loaded_hooks.append({
+                    "name": hook_name,
+                    "description": manifest.get("description", ""),
+                    "events": events,
+                    "path": str(hook_dir),
+                    "builtin": True,
+                })
+
+                print(f"[hooks] Loaded builtin hook '{hook_name}' for events: {events}", flush=True)
+
+            except Exception as e:
+                print(f"[hooks] Error loading builtin hook {hook_dir.name}: {e}", flush=True)
 
     def discover_and_load(self) -> None:
         """
