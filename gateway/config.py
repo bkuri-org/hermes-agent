@@ -21,6 +21,34 @@ from utils import env_int, env_var_enabled, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+# Default approval keywords for the approval-text-intercept builtin hook.
+# Maps plain-text responses to approval decisions.  Users can override
+# individual mappings via ``gateway.approval_keywords`` in config.yaml.
+DEFAULT_APPROVAL_KEYWORDS: Dict[str, str] = {
+    "yes": "once",
+    "y": "once",
+    "no": "deny",
+    "n": "deny",
+    "deny": "deny",
+    "once": "once",
+    "session": "session",
+    "always": "always",
+}
+
+
+def _merge_approval_keywords(
+    defaults: Dict[str, str],
+    overrides: Dict[str, str],
+) -> Dict[str, str]:
+    """Merge user-specified approval keyword overrides into defaults.
+
+    Returns a new dict.  Overrides replace defaults for the same key and
+    may add new keyword → decision mappings.
+    """
+    merged = dict(defaults)
+    merged.update(overrides)
+    return merged
+
 
 def _coerce_bool(value: Any, default: bool = True) -> bool:
     """Coerce bool-ish config values, preserving a caller-provided default."""
@@ -629,6 +657,10 @@ class GatewayConfig:
     # fresh session exactly as if the reset policy had fired.  0 = disabled.
     session_store_max_age_days: int = 90
 
+    # Approval text-intercept keywords (plain text → approval decision).
+    # Merged from DEFAULT_APPROVAL_KEYWORDS + user overrides in config.yaml.
+    approval_keywords: Dict[str, str] = field(default_factory=dict)
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
         connected = []
@@ -802,6 +834,13 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        # Approval text-intercept keywords
+        approval_kw_raw = data.get("approval_keywords") or nested_gateway.get("approval_keywords")
+        approval_keywords = _merge_approval_keywords(
+            DEFAULT_APPROVAL_KEYWORDS,
+            approval_kw_raw if isinstance(approval_kw_raw, dict) else {},
+        )
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -822,6 +861,7 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
+            approval_keywords=approval_keywords,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -956,6 +996,12 @@ def load_gateway_config() -> GatewayConfig:
                 gw_data["filter_silence_narration"] = yaml_cfg[
                     "filter_silence_narration"
                 ]
+
+            # Approval text-intercept keywords
+            if isinstance(gateway_cfg, dict) and "approval_keywords" in gateway_cfg:
+                ak = gateway_cfg["approval_keywords"]
+                if isinstance(ak, dict):
+                    gw_data["approval_keywords"] = ak
 
             if "unauthorized_dm_behavior" in yaml_cfg:
                 gw_data["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(
