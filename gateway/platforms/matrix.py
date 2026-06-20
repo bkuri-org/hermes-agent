@@ -977,6 +977,38 @@ class MatrixAdapter(BasePlatformAdapter):
         from gateway.platforms.base import resolve_channel_skills
         return resolve_channel_skills(self.config.extra, room_id)
 
+    # ------------------------------------------------------------------
+    # Per-room prompt & skill resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_room_prompt(self, room_id: str) -> str | None:
+        """Resolve a per-room ephemeral prompt from Matrix config.
+
+        Config format (under ``matrix`` in config.yaml)::
+
+            channel_prompts:
+              "!roomid:server": |
+                This is the ops room. Focus on infra only.
+
+        Returns the prompt string, or None if no match is found.
+        """
+        from gateway.platforms.base import resolve_channel_prompt
+        return resolve_channel_prompt(self.config.extra, room_id)
+
+    def _resolve_room_skills(self, room_id: str) -> list[str] | None:
+        """Resolve auto-loaded skill(s) for a Matrix room.
+
+        Config format (under ``matrix`` in config.yaml)::
+
+            channel_skill_bindings:
+              - id: "!roomid:server"
+                skills: ["infra-health", "incident-response"]
+
+        Returns a deduplicated list of skill names, or None.
+        """
+        from gateway.platforms.base import resolve_channel_skills
+        return resolve_channel_skills(self.config.extra, room_id)
+
     def _is_duplicate_event(self, event_id) -> bool:
         """Return True if this event was already processed. Tracks the ID otherwise."""
         if not event_id:
